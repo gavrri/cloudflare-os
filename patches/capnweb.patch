@@ -1,0 +1,70 @@
+diff --git a/dist/index-workers.d.ts b/dist/index-workers.d.ts
+index 2a68582bd3bcf63dd333c8fb1db6ba3a71e9db6c..177079c929795003917b5fb26f971adaad49885e 100644
+--- a/dist/index-workers.d.ts
++++ b/dist/index-workers.d.ts
+@@ -218,6 +218,16 @@ interface RpcTransport {
+    * peer, so if that is dropped, the peer may have less information about what happened.)
+    */
+   abort?(reason: any): void;
++  // -- ADDED FOR GADGETS --
++  /**
++   * If provided, called synchronously immediately before every local method invocation this
++   * transport's session dispatches -- after the call's target and arguments have finished
++   * resolving (which, for a pipelined or asynchronously-produced target, can happen well after
++   * the request that triggered the call was received). Throw to reject that call instead of
++   * invoking it. This is the only hook point late enough to see a deadline that expired while a
++   * target/argument promise was still pending; a `receive()`-time check alone cannot.
++   */
++  checkDeadline?(): void;
+ }
+ /**
+  * Interface for a transport that receives partially encoded JS values instead of JSON strings.
+@@ -255,6 +265,9 @@ interface RpcTransportWithCustomEncoding {
+    * peer, so if that is dropped, the peer may have less information about what happened.)
+    */
+   abort?(reason: any): void;
++  // -- ADDED FOR GADGETS --
++  /** See `RpcTransport.checkDeadline`. */
++  checkDeadline?(): void;
+ }
+ /** Any supported transport type. */
+ type AnyRpcTransport = RpcTransport | RpcTransportWithCustomEncoding;
+diff --git a/dist/index-workers.js b/dist/index-workers.js
+index 408ad065a52f174928e1d193ae05a545442760de..1712ffe003abd249a68cb76a7baca58c29418b49 100644
+--- a/dist/index-workers.js
++++ b/dist/index-workers.js
+@@ -314,6 +314,11 @@ var RpcPayload = class RpcPayload {
+ 	source;
+ 	hooks;
+ 	promises;
++	// -- ADDED FOR GADGETS --
++	// The RpcSessionImpl this payload was deserialized for (set by Evaluator.evaluateWithDepth).
++	// Undefined for payloads built locally (fromAppParams/fromAppReturn/etc.) rather than off the
++	// wire, which never reach deliverCall as call arguments anyway.
++	session;
+ 	static fromAppParams(value) {
+ 		return new RpcPayload(value, "params");
+ 	}
+@@ -551,6 +556,13 @@ var RpcPayload = class RpcPayload {
+ 			let promises = [];
+ 			this.deliverTo(this, "value", promises);
+ 			if (promises.length > 0) await Promise.all(promises);
++			// -- ADDED FOR GADGETS --
++			// Re-check right here, not earlier: this is after both the call's target (thisArg) and
++			// its arguments (the awaited `promises` above) have finished resolving, which for a
++			// pipelined/async target can take arbitrarily long after the message that requested the
++			// call was received. A transport-level receive() check can't see this gap. Optional and
++			// duck-typed so transports that don't care about deadlines are unaffected.
++			this.session?.transport?.checkDeadline?.();
+ 			let result = Function.prototype.apply.call(func, thisArg, this.value);
+ 			if (result instanceof RpcPromise$1) return RpcPayload.fromAppReturn(result);
+ 			else return RpcPayload.fromAppReturn(await result);
+@@ -1427,6 +1439,8 @@ var Evaluator = class Evaluator {
+ 	}
+ 	evaluateWithDepth(value, depth) {
+ 		let payload = RpcPayload.forEvaluate(this.hooks, this.promises);
++		// -- ADDED FOR GADGETS --
++		payload.session = this.importer;
+ 		try {
+ 			payload.value = this.evaluateImpl(value, payload, "value", depth);
+ 			return payload;

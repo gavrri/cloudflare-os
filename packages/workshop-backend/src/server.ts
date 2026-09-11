@@ -1,4 +1,4 @@
-import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
+import { RpcStub, RpcTarget, RpcSession, WebSocketTransport, newHttpBatchRpcResponse, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
@@ -26,6 +26,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
+import { accessSessionDeadline, guardTransportDeadline } from "./auth/access-session-lifetime.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -860,6 +861,7 @@ export default {
       }
 
       let accessPayload: JWTPayload | undefined;
+      let accessDeadline: number | undefined;
 
       if (env.CF_ACCESS_AUD) {
         if (req.headers.get("Origin") !== url.origin) {
@@ -871,6 +873,15 @@ export default {
 
         if (!payload.email) {
           return new Response("Access JWT didn't specify email address.", { status: 403 });
+        }
+
+        // Reject a malformed or already-expired assertion up front, before any capability is
+        // minted from it, rather than letting a bad lifetime surface later as a confusing RPC
+        // failure.
+        try {
+          accessDeadline = accessSessionDeadline(payload);
+        } catch (err) {
+          return new Response("Invalid Access session lifetime.", { status: 403 });
         }
 
         accessPayload = payload;
@@ -885,9 +896,21 @@ export default {
         abortController.abort(reason);
       };
 
+      if (accessDeadline !== undefined) {
+        // Belt-and-suspenders close: guardTransportDeadline() already rejects every inbound
+        // message once the deadline has passed, but a WebSocket connection that just sits idle
+        // past expiry has no inbound message to reject, so also hard-close it once the lease runs
+        // out. (No effect on HTTP batch, which has no persistent connection to idle on.)
+        let deadline = accessDeadline;
+        let timer = setTimeout(
+            () => abortSession(new Error("Access session expired.")),
+            Math.max(0, deadline - Date.now()));
+        abortController.signal.addEventListener("abort", () => clearTimeout(timer));
+      }
+
       return await newWorkersRpcResponse(req,
           new PublicApiImpl(ctx, env, abortSession, accessPayload),
-          { abortSignal: abortController.signal });
+          { abortSignal: abortController.signal, accessDeadline, abortSession });
     }
 
     return new Response("Not Found", {status: 404});
@@ -902,14 +925,71 @@ export default {
 type ExtendedRpcSessionOptions = RpcSessionOptions & {
   // Abort WebSocket sessions when this AbortSignal is aborted. (No effect on HTTP batch sessions.)
   abortSignal: AbortSignal;
+  // When set, no inbound message is dispatched and no method invocation on an exported capability
+  // is delivered once this deadline has passed, for both the WebSocket and HTTP batch transports
+  // (see guardTransportDeadline()). Enforced at the transport/invocation layer, not by wrapping
+  // the RPC target, so it also covers capabilities returned mid-session before the deadline.
+  accessDeadline?: number;
+  abortSession: (reason: Error) => void;
 };
 
+// Minimal clone of Cap'n Web's internal (unexported) BatchServerTransport, needed so an
+// Access-gated request can run its batch through a guardTransportDeadline()-wrapped transport
+// instead of newHttpBatchRpcResponse()'s own unwrapped one. See guardTransportDeadline() for why
+// a receive()-time check is required in addition to the accessDeadline option's pre-invocation
+// checkDeadline() hook: a batch's messages are all in memory as soon as the body is read, so
+// without this, a call whose target/arguments were still resolving when the deadline passed would
+// have no further receive() left to reject it.
+class HttpBatchServerTransport {
+  #toSend: string[] = [];
+  #toReceive: string[];
+  #allReceived = Promise.withResolvers<void>();
+
+  constructor(batch: string[]) { this.#toReceive = batch; }
+
+  send(message: string) { this.#toSend.push(message); }
+
+  async receive(): Promise<string> {
+    let message = this.#toReceive.shift();
+    if (message !== undefined) return message;
+    this.#allReceived.resolve();
+    return new Promise(() => {});
+  }
+
+  abort(reason: unknown) { this.#allReceived.reject(reason); }
+  whenAllReceived(): Promise<void> { return this.#allReceived.promise; }
+  getResponseBody(): string { return this.#toSend.join("\n"); }
+}
+
 // Clone of newWorkersRpcResponse() from Cap'n Web, except the `options` has been extended with
-// `abortSignal`.
-async function newWorkersRpcResponse(
+// `abortSignal` and `accessDeadline`.
+export async function newWorkersRpcResponse(
     request: Request, localMain: any, options?: ExtendedRpcSessionOptions) {
   if (request.method === "POST") {
-    let response = await newHttpBatchRpcResponse(request, localMain, options);
+    if (options?.accessDeadline !== undefined && Date.now() >= options.accessDeadline) {
+      options.abortSession(new Error("Access session expired."));
+      return new Response("Access session expired.", { status: 403 });
+    }
+    let response: Response;
+    if (options?.accessDeadline !== undefined) {
+      let deadline = options.accessDeadline;
+      let body = await request.text();
+      let transport = new HttpBatchServerTransport(body === "" ? [] : body.split("\n"));
+      let guardedTransport = guardTransportDeadline(transport, deadline, options.abortSession);
+      let rpc = new RpcSession(guardedTransport, localMain, options);
+      try {
+        await transport.whenAllReceived();
+        await rpc.drain();
+      } catch (err) {
+        // The guarded transport's receive()/checkDeadline() reject via transport.abort(), which
+        // rejects whenAllReceived() (and, equivalently, drain()) with the same error -- turn that
+        // into a normal HTTP response instead of letting it propagate as a thrown rejection.
+        return new Response("Access session expired.", { status: 403 });
+      }
+      response = new Response(transport.getResponseBody());
+    } else {
+      response = await newHttpBatchRpcResponse(request, localMain, options);
+    }
     // Since we're exposing the same API over WebSocket, too, and WebSocket always allows
     // cross-origin requests, the API necessarily must be safe for cross-origin use (e.g. because
     // it uses in-band authorization, as recommended in the readme). So, we might as well allow
@@ -932,7 +1012,12 @@ function newWorkersWebSocketRpcResponse(
   let pair = new WebSocketPair();
   let server = pair[0];
   server.accept()
-  let stub = newWebSocketRpcSession(server, localMain, options);
+  let transport = new WebSocketTransport(server);
+  let guardedTransport = options?.accessDeadline !== undefined
+      ? guardTransportDeadline(transport, options.accessDeadline, options.abortSession)
+      : transport;
+  let session = new RpcSession(guardedTransport, localMain, options);
+  let stub = session.getRemoteMain();
 
   // -- ADDED FOR GADGETS --
   if (options?.abortSignal) {

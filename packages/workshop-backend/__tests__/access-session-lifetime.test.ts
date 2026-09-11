@@ -37,6 +37,18 @@ describe("Access session lifetime", () => {
 
 // Exercise the production HTTP adapter with real Requests and client-generated wire batches.
 describe("Access HTTP dispatch deadline", () => {
+  it("preserves malformed batch rejection instead of misreporting Access expiry", async () => {
+    const controller = new AbortController();
+    const request = () => new Request("https://workshop.example/api", {
+      method: "POST", body: "not valid JSON",
+    });
+    await expect(newWorkersRpcResponse(request(), new RpcTarget())).rejects.toThrow();
+    await expect(newWorkersRpcResponse(request(), new RpcTarget(), {
+      accessDeadline: Date.now() + 28_800_000,
+      abortSignal: controller.signal,
+      abortSession: (error) => controller.abort(error),
+    })).rejects.toThrow();
+  });
   function batch(pipeline: boolean) {
     const messages: string[] = [];
     const client = new RpcSession({

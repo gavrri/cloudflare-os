@@ -896,18 +896,6 @@ export default {
         abortController.abort(reason);
       };
 
-      if (accessDeadline !== undefined) {
-        // Belt-and-suspenders close: guardTransportDeadline() already rejects every inbound
-        // message once the deadline has passed, but a WebSocket connection that just sits idle
-        // past expiry has no inbound message to reject, so also hard-close it once the lease runs
-        // out. (No effect on HTTP batch, which has no persistent connection to idle on.)
-        let deadline = accessDeadline;
-        let timer = setTimeout(
-            () => abortSession(new Error("Access session expired.")),
-            Math.max(0, deadline - Date.now()));
-        abortController.signal.addEventListener("abort", () => clearTimeout(timer));
-      }
-
       return await newWorkersRpcResponse(req,
           new PublicApiImpl(ctx, env, abortSession, accessPayload),
           { abortSignal: abortController.signal, accessDeadline, abortSession });
@@ -975,18 +963,24 @@ export async function newWorkersRpcResponse(
       let deadline = options.accessDeadline;
       let body = await request.text();
       let transport = new HttpBatchServerTransport(body === "" ? [] : body.split("\n"));
-      let guardedTransport = guardTransportDeadline(transport, deadline, options.abortSession);
+      let expired = false;
+      let guardedTransport = guardTransportDeadline(transport, deadline, (reason) => {
+        expired = true;
+        options.abortSession(reason);
+      });
       let rpc = new RpcSession(guardedTransport, localMain, options);
       try {
         await transport.whenAllReceived();
         await rpc.drain();
+        response = new Response(transport.getResponseBody());
       } catch (err) {
-        // The guarded transport's receive()/checkDeadline() reject via transport.abort(), which
-        // rejects whenAllReceived() (and, equivalently, drain()) with the same error -- turn that
-        // into a normal HTTP response instead of letting it propagate as a thrown rejection.
+        // Preserve protocol/handler errors; only our deadline guard establishes expiry.
+        if (!expired) throw err;
         return new Response("Access session expired.", { status: 403 });
+      } finally {
+        // RpcSession exposes disposal through its main stub, including batch sessions.
+        rpc.getRemoteMain()[Symbol.dispose]();
       }
-      response = new Response(transport.getResponseBody());
     } else {
       response = await newHttpBatchRpcResponse(request, localMain, options);
     }
@@ -1019,17 +1013,29 @@ function newWorkersWebSocketRpcResponse(
   let session = new RpcSession(guardedTransport, localMain, options);
   let stub = session.getRemoteMain();
 
-  // -- ADDED FOR GADGETS --
-  if (options?.abortSignal) {
-    if (options.abortSignal.aborted) {
-      stub[Symbol.dispose]();
-    } else {
-      options.abortSignal.addEventListener("abort", () => {
-        stub[Symbol.dispose]();
-      });
-    }
+  // A lease timer belongs to this WebSocket, never to an HTTP request.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  let cleanup = () => {
+    if (disposed) return;
+    disposed = true;
+    if (timer !== undefined) clearTimeout(timer);
+    options?.abortSignal.removeEventListener("abort", cleanup);
+    server.removeEventListener("close", cleanup);
+    server.removeEventListener("error", cleanup);
+    stub[Symbol.dispose]();
+  };
+  server.addEventListener("close", cleanup, { once: true });
+  server.addEventListener("error", cleanup, { once: true });
+  options?.abortSignal.addEventListener("abort", cleanup, { once: true });
+  if (options?.abortSignal.aborted) {
+    cleanup();
+  } else if (options?.accessDeadline !== undefined) {
+    timer = setTimeout(() => {
+      cleanup();
+      options.abortSession(new Error("Access session expired."));
+    }, Math.max(0, options.accessDeadline - Date.now()));
   }
-  // -- END ADDED FOR GADGETS --
 
   return new Response(null, {
     status: 101,

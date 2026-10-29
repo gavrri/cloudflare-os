@@ -100,6 +100,10 @@ function findGatekeepers(parentDir: string): Gatekeeper[] {
 }
 
 const gatekeepers = findGatekeepers(PACKAGES_DIR);
+// This synthetic sales connector is deliberately not a deployable package. It is opt-in only.
+if (process.argv.includes("--local-sales-demo")) {
+  gatekeepers.push({name:"gatekeeper-gavrri-sales",dir:join(PACKAGES_DIR,"gatekeeper-gavrri-sales")});
+}
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
@@ -494,7 +498,7 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
 };
 
 for (const gk of gatekeepers) {
-  const srcPath = join(gk.dir, "wrangler.jsonc");
+  const srcPath = join(gk.dir, gk.name === "gatekeeper-gavrri-sales" ? "wrangler.local.jsonc" : "wrangler.jsonc");
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = devBuildConfig(config.build, gk.dir);
   config.vars = config.vars || {};

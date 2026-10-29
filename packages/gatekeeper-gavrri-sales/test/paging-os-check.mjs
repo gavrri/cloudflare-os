@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {connect,signUp,listConnectedAccounts,waitFor} from '../../integration-tests/src/rpc-client.ts';
+import {JSDOM} from '../../gatekeeper-scheduler/node_modules/jsdom/lib/api.js';
+if(process.env.SALES_DISPOSABLE_DB!=='confirmed')throw new Error('Requires isolated disposable OS and D1, never the user demo');
+const api=connect(new URL('http://127.0.0.1:8789'));
+
+try{
+ const alice=await signUp(api,`pagetest${Date.now()}`);await alice.provisionAmbientAccount('gavrri_sales');
+ const account=await waitFor('sales account',async()=>(await listConnectedAccounts(alice)).find(a=>a.vendorId==='gavrri_sales')??null);
+ const workspace=await alice.newGadget();const keeper=await workspace.newGatekeeper(account.id,'sales://local-demo');const session=await keeper.openSession();
+ const first=await session.listCandidates(null);assert.equal(first.items.length,100);assert.ok(first.nextCursor);const second=await session.listCandidates(first.nextCursor);assert.equal(second.items.length,100);assert.ok(second.nextCursor);const third=await session.listCandidates(second.nextCursor);assert.equal(third.items.length,2);assert.equal(third.nextCursor,null);assert.equal(new Set([...first.items,...second.items,...third.items].map(x=>x.id)).size,202);assert.deepEqual((await session.listCandidates(first.nextCursor)).items.map(x=>x.id),second.items.map(x=>x.id));
+ const events1=await session.listEvents('tc000',null);assert.equal(events1.items.length,100);const events2=await session.listEvents('tc000',events1.nextCursor);assert.equal(events2.items.length,1);assert.equal(events2.items[0].kind,'human_reply');await assert.rejects(async()=>await session.listEvents('tc001',events1.nextCursor));await assert.rejects(async()=>await session.listEvents('tc000',first.nextCursor));await assert.rejects(async()=>await session.listCandidates('bad'));
+ const session2=await keeper.openSession();await assert.rejects(async()=>await session2.listCandidates(first.nextCursor));await assert.rejects(async()=>await session.getMetrics({dataset:'actual',offer:null,currency:'JPY',month:'2026-10',asOf:'2026-10-29'}));
+ const source=await readFile(new URL('../../../plans/gavrri-revenue-slice/gadget/client.js',import.meta.url),'utf8');
+ const make=async(fail)=>{const dom=new JSDOM('<html><head></head><body></body></html>',{runScripts:'outside-only',url:'http://local.test/'});dom.window.gadget={listCandidates:async cursor=>{if(fail==='candidate'&&cursor)throw Error('candidate page failed');return session.listCandidates(cursor)},listEvents:async(id,cursor)=>{if(fail==='history'&&id==='tc000'&&cursor)throw Error('event page failed');return session.listEvents(id,cursor)},getMetrics:scope=>session.getMetrics(JSON.parse(JSON.stringify(scope))),listCompanies:()=>session.listCompanies(),listLimits:()=>session.listLimits()};await dom.window.eval(`(async()=>{${source}\n})()`);return dom};
+ const dom=await make();const doc=dom.window.document;if(!doc.querySelectorAll('[data-candidate]').length)console.log("UI ERROR",doc.querySelector(".error")?.textContent);assert.equal(doc.querySelectorAll('[data-candidate]').length,202);const field=doc.querySelector('#search');field.value='架空企業150';field.dispatchEvent(new dom.window.Event('input',{bubbles:true}));assert.equal(doc.querySelectorAll('[data-candidate]').length,1);assert.match(doc.querySelector('[data-candidate]').textContent,/架空企業150/);field.value='架空企業000';field.dispatchEvent(new dom.window.Event('input',{bubbles:true}));assert.match(doc.querySelector('[data-candidate]').textContent,/返信: 人間返信 · 2026-10-28/);dom.window.close();
+ const partial=await make('history');const item=partial.window.document.querySelector('[data-candidate="tc000"]');assert.match(item.textContent,/全履歴未確認/);assert.match(item.textContent,/返信: 未確認/);partial.window.close();
+ const failure=await make('candidate');assert.equal(failure.window.document.querySelectorAll('[data-candidate]').length,0);assert.match(failure.window.document.body.textContent,/candidate page failed/);assert.match(failure.window.document.body.textContent,/全件取得は未確認/);failure.window.close();
+ console.log('PASS 202 candidates, 101 events, live Gatekeeper/Observer/D1/RPC; search, latest reply, foreign cursors, failures');
+}finally{api[Symbol.dispose]()}

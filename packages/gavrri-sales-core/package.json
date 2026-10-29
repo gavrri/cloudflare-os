@@ -1,0 +1,17 @@
+{
+  "name": "@gadgets/gavrri-sales-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test test/core.test.mjs test/capability.test.mjs test/preview.test.mjs test/alias-migration.test.mjs"
+  },
+  "exports": {
+    "./capability": "./src/capability.mjs",
+    "./pending": "./src/pending.mjs",
+    "./metrics": "./src/metrics.mjs",
+    "./core": "./src/core.mjs",
+    "./preview": "./src/preview.mjs"
+  }
+}

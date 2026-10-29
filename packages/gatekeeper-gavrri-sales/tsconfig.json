@@ -1,0 +1,26 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "./worker-configuration.d.ts"
+    ],
+    "paths": {
+      "@gadgets/workshop-shared/*": [
+        "../workshop-shared/src/*"
+      ],
+      "@gadgets/configurator-ui": [
+        "../configurator-ui/src/index.ts"
+      ]
+    },
+    "jsx": "react",
+    "jsxFactory": "h"
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    ".wrangler"
+  ]
+}

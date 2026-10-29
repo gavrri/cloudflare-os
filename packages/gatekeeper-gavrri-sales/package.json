@@ -1,0 +1,21 @@
+{
+  "name": "@gadgets/gatekeeper-gavrri-sales",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@gadgets/workshop-shared": "workspace:*",
+    "@gadgets/gavrri-sales-core": "workspace:*",
+    "capnweb-validate": "catalog:",
+    "@gadgets/configurator-ui": "workspace:*",
+    "capnweb": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "wrangler": "catalog:",
+    "@gadgets/scripts": "workspace:*"
+  }
+}

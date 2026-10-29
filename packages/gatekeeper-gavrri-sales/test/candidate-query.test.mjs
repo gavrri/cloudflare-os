@@ -1,0 +1,24 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { candidateQuery } from '../src/candidate-query.mjs';
+const read=(p)=>readFileSync(new URL(p,import.meta.url),'utf8');
+test('candidate list shows recorded refusal across explicit aliases and preserves unknown status',()=>{
+  const db=new DatabaseSync(':memory:');
+  db.exec(read('../../gavrri-sales-core/migrations/0001.sql'));
+  db.exec(read('../../gavrri-sales-core/migrations/0002_company_alias_version.sql'));
+  db.exec(read('../local-owner.sql'));
+  db.exec(read('../demo-list-extra.sql'));
+  db.exec(read('../demo-list-extra.sql'));
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM events WHERE id LIKE 'sample-list-%'").get().n,7);
+  const rows=db.prepare(candidateQuery).all(0, 999999);
+  assert.equal(rows.find(r=>r.id==='sample-list-d1').company_refused,1);
+  assert.equal(rows.find(r=>r.id==='sample-list-c1').registry_status,'future');
+  assert.equal(rows.find(r=>r.id==='sample-list-c1').company_refused,0);
+  db.prepare('INSERT INTO company_aliases(id,company_id,name,request_id,expected_version) VALUES(?,?,?,?,?)').run('sample-list-d','sample-list-c','架空：月光研究室','sample-list-link',1);
+  const linked=db.prepare(candidateQuery).all(0, 999999);
+  assert.equal(linked.find(r=>r.id==='sample-list-c1').company_refused,1);
+  assert.equal(linked.find(r=>r.id==='sample-list-d1').company_refused,1);
+  assert.equal(linked.find(r=>r.id==='sample-list-a2').company_refused,0);
+});

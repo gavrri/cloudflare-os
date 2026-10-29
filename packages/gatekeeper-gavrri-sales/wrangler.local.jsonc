@@ -1,0 +1,11 @@
+{
+  "$schema":"./node_modules/wrangler/config-schema.json",
+  "name":"gatekeeper-gavrri-sales",
+  "main":".wrangler/validate/src/index.ts",
+  "build":{"command":"pnpm exec capnweb-validate build --out .wrangler/validate","watch_dir":"src"},
+  "compatibility_date":"2026-09-04",
+  "compatibility_flags":["allow_irrevocable_stub_storage","nodejs_als"],
+  "vars":{"LOCAL_SALES_DEMO":"true"},
+  "d1_databases":[{"binding":"SALES_DB","database_name":"gavrri-sales-local-demo","database_id":"00000000-0000-0000-0000-000000000000"}],
+  "migrations":[{"tag":"v1","new_sqlite_classes":["SalesGatekeeper"]}]
+}

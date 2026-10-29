@@ -1,0 +1,3 @@
+// Prints synthetic SQL for an isolated D1 after the local demo seed.
+for(let i=0;i<201;i++){const n=String(i).padStart(3,'0');console.log(`INSERT INTO companies(id,name) VALUES('tco${n}','架空企業${n}');`);console.log(`INSERT INTO candidates(id,company_id,offer,motion,registry_status) VALUES('tc${n}','tco${n}','demo','direct','active');`)}
+for(let i=0;i<101;i++){const n=String(i).padStart(3,'0'),kind=i===100?'human_reply':'note',day=i===100?'2026-10-28':'2026-01-01';const evidence=JSON.stringify({sourceRef:`test-${i}`,sourceUrl:'https://example.com/',recordedOn:'2026-10-28',confirmation:'confirmed'});console.log(`INSERT INTO events(id,candidate_id,kind,occurred_on,evidence,note,request_id) VALUES('te${n}','tc000','${kind}','${day}','${evidence}','','tr${n}');`)}
